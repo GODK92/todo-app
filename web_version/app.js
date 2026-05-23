@@ -1,15 +1,8 @@
-// app.js — 할 일 관리 앱: Supabase 연동 / 렌더링 / 이벤트 / 초기화
-
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { SUPABASE_URL, SUPABASE_KEY } from "./supabase-config.js";
-
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
-const TABLE = "todos";
+// app.js — 할 일 관리 앱(데스크탑 버전): 데이터 / 렌더링 / 이벤트 / 초기화
 
 // ---------- 상수 & 상태 ----------
 
-// 과거 로컬 스토리지 데이터를 Supabase로 1회 마이그레이션할 때만 참조한다.
-const LEGACY_STORAGE_KEY = "todos";
+const STORAGE_KEY = "todos";
 
 const CATEGORY_LABELS = {
     work: "업무",
@@ -17,8 +10,15 @@ const CATEGORY_LABELS = {
     study: "공부",
 };
 
-const VALID_CATEGORIES = new Set(Object.keys(CATEGORY_LABELS));
+const FILTER_TITLES = {
+    all: "전체 할 일",
+    work: "업무",
+    personal: "개인",
+    study: "공부",
+};
 
+// 자동 분류용 키워드 — 텍스트에 포함된 키워드 수가 가장 많은 카테고리로 분류한다.
+// 동률일 경우 객체 키 순회 순서(work → study → personal)가 우선순위 역할을 한다.
 const CATEGORY_KEYWORDS = {
     work: [
         "회의", "미팅", "보고서", "보고", "이메일", "메일", "발표", "프로젝트",
@@ -37,8 +37,10 @@ const CATEGORY_KEYWORDS = {
     ],
 };
 
+// 자동 분류 매칭이 전혀 없을 때 사용할 기본 카테고리.
 const AUTO_FALLBACK_CATEGORY = "personal";
 
+// 키워드 사전을 매 호출마다 lowercase로 변환하지 않도록 미리 정규화한 사전을 만든다.
 const CATEGORY_KEYWORDS_LC = Object.fromEntries(
     Object.entries(CATEGORY_KEYWORDS).map(([cat, kws]) => [
         cat,
@@ -46,23 +48,28 @@ const CATEGORY_KEYWORDS_LC = Object.fromEntries(
     ])
 );
 
+// 자동 분류 힌트 갱신을 디바운스하기 위한 지연(ms).
 const AUTO_HINT_DEBOUNCE_MS = 150;
+
+// 입력 글자수 제한(HTML maxlength와 동일).
 const INPUT_MAX_LENGTH = 200;
+
+// 토스트 노출 시간(ms).
 const UNDO_TOAST_DURATION_MS = 5000;
 const INFO_TOAST_DURATION_MS = 4000;
-const ERROR_TOAST_DURATION_MS = 5000;
-
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 let currentFilter = "all";
 
-// 메모리 상태 — Supabase가 진실의 원천이고, 이 배열은 렌더링을 위한 캐시이자
-// 낙관적 업데이트(optimistic update)의 기반이 된다.
+// 메모리 상태 — localStorage는 초기 로드와 mutate 후 저장에만 사용한다.
 let todosState = [];
 
+// 자동 힌트 디바운스 타이머 핸들.
 let autoHintTimer = null;
+
+// 최근 추가된 todo id — 다음 렌더에서 등장 애니메이션을 한 번만 부여하기 위해 사용한다.
 let recentlyAddedId = null;
 
+// DOM 참조 — DOMContentLoaded에서 채워진다.
 let todoListEl;
 let todoInputEl;
 let categorySelectEl;
@@ -75,9 +82,17 @@ let autoHintEl;
 let inputCounterEl;
 let emptyStateEl;
 let toastContainerEl;
+let listTitleEl;
+let listMetaEl;
+let statTotalEl;
+let statDoneEl;
+let statRemainingEl;
+let countEls;
 
 // ---------- 자동 카테고리 분류 ----------
 
+// 텍스트를 카테고리별 키워드와 매칭해 가장 점수가 높은 카테고리를 반환한다.
+// 0점이면 AUTO_FALLBACK_CATEGORY를 반환하고, 동률은 객체 키 순회 순서로 결정된다.
 function classifyByKeywords(text) {
     if (!text) return AUTO_FALLBACK_CATEGORY;
     const lower = text.toLowerCase();
@@ -97,126 +112,110 @@ function classifyByKeywords(text) {
     return best;
 }
 
+// 셀렉트가 "auto"면 키워드 분류 결과로 치환, 아니면 원래 값 그대로 사용한다.
 function resolveCategory(selectValue, text) {
     return selectValue === "auto" ? classifyByKeywords(text) : selectValue;
 }
 
-// ---------- 유틸 ----------
+// ---------- 데이터 계층 ----------
 
+// localStorage에서 할 일 배열을 불러온다. 손상된 JSON은 빈 배열로 복구한다.
+function loadTodos() {
+    let raw = null;
+    try {
+        raw = localStorage.getItem(STORAGE_KEY);
+    } catch (e) {
+        console.warn("localStorage 접근 실패:", e);
+        return [];
+    }
+    if (!raw) return [];
+    try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+    } catch (e) {
+        console.warn("todos 데이터 손상, 빈 배열로 복구:", e);
+        return [];
+    }
+}
+
+// 현재 메모리 상태를 localStorage에 JSON으로 저장한다.
+// 저장 실패 시(용량 초과, 프라이빗 모드 등) 사용자에게 토스트로 안내한다.
+function saveTodos() {
+    try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(todosState));
+        return true;
+    } catch (e) {
+        console.warn("저장 실패:", e);
+        showToast({
+            message: "저장에 실패했습니다. 브라우저 저장 공간을 확인해 주세요.",
+            type: "error",
+            duration: INFO_TOAST_DURATION_MS,
+        });
+        return false;
+    }
+}
+
+// ID 충돌을 피하기 위해 가능한 경우 crypto.randomUUID를 사용한다.
 function generateId() {
     return (
         crypto.randomUUID?.() ??
-        // Supabase의 uuid 컬럼은 진짜 UUID v4 형식만 받으므로 폴백도 형식을 맞춘다.
-        "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) =>
-            (
-                Number(c) ^
-                (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (Number(c) / 4)))
-            ).toString(16)
-        )
+        `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
     );
 }
 
-function truncate(s, max) {
-    if (typeof s !== "string") return "";
-    return s.length > max ? s.slice(0, max - 1) + "…" : s;
+// 새 할 일을 만들어 메모리 상태에 추가하고 저장한다.
+function addTodo(text, category) {
+    const todo = {
+        id: generateId(),
+        text,
+        category,
+        completed: false,
+        createdAt: new Date().toISOString(),
+    };
+    todosState.push(todo);
+    saveTodos();
+    return todo;
 }
 
-// ---------- Supabase 데이터 계층 ----------
-
-async function fetchAllTodos() {
-    const { data, error } = await supabase
-        .from(TABLE)
-        .select("id, text, category, completed, created_at")
-        .order("created_at", { ascending: true });
-    if (error) throw error;
-    return (data ?? []).map((row) => ({
-        id: row.id,
-        text: row.text,
-        category: row.category,
-        completed: row.completed,
-        createdAt: row.created_at,
-    }));
+// id로 찾은 할 일의 텍스트와 카테고리를 갱신한다.
+function updateTodo(id, newText, newCategory) {
+    const todo = todosState.find((t) => t.id === id);
+    if (!todo) return null;
+    todo.text = newText;
+    todo.category = newCategory;
+    saveTodos();
+    return todo;
 }
 
-async function insertTodo(todo) {
-    const { error } = await supabase.from(TABLE).insert({
-        id: todo.id,
-        text: todo.text,
-        category: todo.category,
-        completed: todo.completed,
-        created_at: todo.createdAt,
-    });
-    if (error) throw error;
+// id에 해당하는 할 일을 메모리 상태에서 제거한다.
+// 복구를 위해 제거된 항목과 그 인덱스를 반환한다.
+function deleteTodo(id) {
+    const idx = todosState.findIndex((t) => t.id === id);
+    if (idx === -1) return null;
+    const [removed] = todosState.splice(idx, 1);
+    saveTodos();
+    return { todo: removed, index: idx };
 }
 
-async function updateTodoOnServer(id, fields) {
-    const { error } = await supabase.from(TABLE).update(fields).eq("id", id);
-    if (error) throw error;
+// 삭제 취소 — 원래 자리에 다시 끼워 넣고 저장한다.
+function restoreTodo(todo, index) {
+    const safeIndex = Math.min(Math.max(index, 0), todosState.length);
+    todosState.splice(safeIndex, 0, todo);
+    saveTodos();
 }
 
-async function deleteTodoOnServer(id) {
-    const { error } = await supabase.from(TABLE).delete().eq("id", id);
-    if (error) throw error;
-}
-
-// 과거 localStorage에 남아 있던 todos를 1회 Supabase로 이관하고 키를 제거한다.
-// 같은 id가 이미 서버에 있으면 upsert로 충돌 없이 흡수된다.
-async function migrateLegacyLocalStorage() {
-    let raw = null;
-    try {
-        raw = localStorage.getItem(LEGACY_STORAGE_KEY);
-    } catch (e) {
-        console.warn("localStorage 접근 실패:", e);
-        return { migrated: 0 };
-    }
-    if (!raw) return { migrated: 0 };
-    let parsed;
-    try {
-        parsed = JSON.parse(raw);
-    } catch {
-        try { localStorage.removeItem(LEGACY_STORAGE_KEY); } catch {}
-        return { migrated: 0 };
-    }
-    if (!Array.isArray(parsed) || parsed.length === 0) {
-        try { localStorage.removeItem(LEGACY_STORAGE_KEY); } catch {}
-        return { migrated: 0 };
-    }
-
-    const rows = [];
-    for (const t of parsed) {
-        if (!t || typeof t.text !== "string") continue;
-        const text = t.text.trim().slice(0, INPUT_MAX_LENGTH);
-        if (!text) continue;
-        const category = VALID_CATEGORIES.has(t.category) ? t.category : AUTO_FALLBACK_CATEGORY;
-        const id = typeof t.id === "string" && UUID_RE.test(t.id) ? t.id : generateId();
-        const createdAt = typeof t.createdAt === "string" && t.createdAt
-            ? t.createdAt
-            : new Date().toISOString();
-        rows.push({
-            id,
-            text,
-            category,
-            completed: !!t.completed,
-            created_at: createdAt,
-        });
-    }
-
-    if (rows.length === 0) {
-        try { localStorage.removeItem(LEGACY_STORAGE_KEY); } catch {}
-        return { migrated: 0 };
-    }
-
-    const { error } = await supabase.from(TABLE).upsert(rows, { onConflict: "id" });
-    if (error) {
-        // 실패 시 localStorage는 보존해서 다음 로딩에 재시도할 수 있게 둔다.
-        throw error;
-    }
-    try { localStorage.removeItem(LEGACY_STORAGE_KEY); } catch {}
-    return { migrated: rows.length };
+// id에 해당하는 할 일의 완료 여부를 뒤집는다.
+function toggleTodo(id) {
+    const todo = todosState.find((t) => t.id === id);
+    if (!todo) return null;
+    todo.completed = !todo.completed;
+    saveTodos();
+    return todo;
 }
 
 // ---------- 토스트 ----------
 
+// 단일 토스트 표시. action이 주어지면 버튼이 함께 노출된다.
 function showToast({ message, action, duration = INFO_TOAST_DURATION_MS, type = "info" }) {
     if (!toastContainerEl) return null;
 
@@ -262,12 +261,9 @@ function showToast({ message, action, duration = INFO_TOAST_DURATION_MS, type = 
     return { dismiss };
 }
 
-function showError(message) {
-    showToast({ message, type: "error", duration: ERROR_TOAST_DURATION_MS });
-}
-
 // ---------- 렌더링 ----------
 
+// 현재 필터에 맞는 항목을 ul에 그리고, 빈 상태 안내·진행률·카운트를 갱신한다.
 function renderTodos() {
     const all = todosState;
     const visible = currentFilter === "all"
@@ -295,8 +291,11 @@ function renderTodos() {
 
     recentlyAddedId = null;
     updateProgress(all);
+    updateCounts(all);
+    updateListHeader(visible.length);
 }
 
+// 단일 할 일에 대한 li 요소를 만든다. 이벤트는 ul에 위임되어 있으므로 여기서는 바인딩하지 않는다.
 function buildTodoItem(todo) {
     const li = document.createElement("li");
     li.className = "todo-item";
@@ -339,13 +338,18 @@ function buildTodoItem(todo) {
     return li;
 }
 
+// 전체 기준(필터 무관) 완료 비율로 프로그레스 바·텍스트·통계 카드를 갱신한다.
 function updateProgress(all = todosState) {
     const total = all.length;
     let done = 0;
     for (const t of all) if (t.completed) done++;
+    const remaining = total - done;
     const percent = total === 0 ? 0 : Math.round((done / total) * 100);
     progressBarFillEl.style.width = percent + "%";
     progressTextEl.textContent = `${done} / ${total} 완료 (${percent}%)`;
+    statTotalEl.textContent = total;
+    statDoneEl.textContent = done;
+    statRemainingEl.textContent = remaining;
     if (progressBarEl) {
         progressBarEl.setAttribute("aria-valuenow", String(percent));
         progressBarEl.setAttribute(
@@ -353,6 +357,53 @@ function updateProgress(all = todosState) {
             `${done} / ${total} 완료 (${percent}%)`
         );
     }
+}
+
+// 사이드바의 카테고리별 카운트를 갱신한다.
+// 각 카테고리에 대해 "총 개수 (남은 개수 남음)" 형태로 표시한다.
+function updateCounts(all = todosState) {
+    const totals = { all: all.length, work: 0, personal: 0, study: 0 };
+    const remaining = { all: 0, work: 0, personal: 0, study: 0 };
+    for (const t of all) {
+        if (totals[t.category] !== undefined) totals[t.category]++;
+        if (!t.completed) {
+            remaining.all++;
+            if (remaining[t.category] !== undefined) remaining[t.category]++;
+        }
+    }
+    for (const [key, el] of Object.entries(countEls)) {
+        // pill 자체에는 총 개수만, 보조 표시로 "남음"을 별도 span으로.
+        el.textContent = totals[key];
+        // 부모 button 안의 "남음" 표시(span.filter-count-remaining)도 갱신.
+        const btn = el.closest(".filter-button");
+        if (!btn) continue;
+        let remEl = btn.querySelector(".filter-count-remaining");
+        if (totals[key] > 0 && remaining[key] !== totals[key]) {
+            // 일부가 완료된 상태일 때만 "X 남음" 보조 표시.
+            if (!remEl) {
+                remEl = document.createElement("span");
+                remEl.className = "filter-count-remaining";
+                el.insertAdjacentElement("afterend", remEl);
+            }
+            remEl.textContent = `${remaining[key]} 남음`;
+            // 스크린리더에서는 카운트와 결합해 자연스럽게 읽히도록 aria-label 보강.
+            el.setAttribute(
+                "aria-label",
+                `${CATEGORY_LABELS[key] ?? "전체"} ${totals[key]}개 중 ${remaining[key]}개 남음`
+            );
+        } else {
+            if (remEl) remEl.remove();
+            el.setAttribute(
+                "aria-label",
+                `${CATEGORY_LABELS[key] ?? "전체"} ${totals[key]}개`
+            );
+        }
+    }
+}
+
+function updateListHeader(visibleCount) {
+    listTitleEl.textContent = FILTER_TITLES[currentFilter] ?? "할 일";
+    listMetaEl.textContent = `${visibleCount}개`;
 }
 
 function setFilter(filter) {
@@ -366,6 +417,7 @@ function setFilter(filter) {
     renderTodos();
 }
 
+// 글자수 카운터 갱신 — 90% 이상이면 강조.
 function updateInputCounter() {
     if (!inputCounterEl) return;
     const len = todoInputEl.value.length;
@@ -374,24 +426,16 @@ function updateInputCounter() {
     inputCounterEl.classList.toggle("at-limit", len >= INPUT_MAX_LENGTH);
 }
 
-// ---------- 이벤트 핸들러 (낙관적 업데이트 + 서버 동기화) ----------
+// ---------- 이벤트 핸들러 ----------
 
-async function handleAdd() {
+// 입력값을 검사 후 새 할 일을 추가한다 (빈 문자열은 무시).
+// "자동" 선택 시 키워드 기반으로 카테고리를 결정해 저장한다.
+function handleAdd() {
     const text = todoInputEl.value.trim();
     if (!text) return;
     const selectValue = categorySelectEl.value;
     const category = resolveCategory(selectValue, text);
-
-    const todo = {
-        id: generateId(),
-        text,
-        category,
-        completed: false,
-        createdAt: new Date().toISOString(),
-    };
-
-    // 1) 낙관적 추가 — 즉시 UI 반영
-    todosState.push(todo);
+    const todo = addTodo(text, category);
     recentlyAddedId = todo.id;
     todoInputEl.value = "";
     updateInputCounter();
@@ -417,20 +461,11 @@ async function handleAdd() {
         });
     }
 
+    // 연속 입력 편의를 위해 포커스 복귀.
     todoInputEl.focus();
-
-    // 2) 서버 동기화 — 실패 시 롤백
-    try {
-        await insertTodo(todo);
-    } catch (e) {
-        console.warn("추가 실패:", e);
-        const idx = todosState.findIndex((t) => t.id === todo.id);
-        if (idx !== -1) todosState.splice(idx, 1);
-        renderTodos();
-        showError("저장에 실패했습니다. 네트워크 상태를 확인해 주세요.");
-    }
 }
 
+// 입력 텍스트와 셀렉트 상태를 보고 자동 분류 미리보기 힌트를 갱신한다.
 function updateAutoHint() {
     if (!autoHintEl) return;
     if (categorySelectEl.value !== "auto") {
@@ -447,6 +482,7 @@ function updateAutoHint() {
     autoHintEl.textContent = `자동 분류: ${CATEGORY_LABELS[category]}`;
 }
 
+// 입력 이벤트 시 디바운스로 updateAutoHint 호출 빈도를 낮춘다.
 function scheduleAutoHintUpdate() {
     if (autoHintTimer !== null) clearTimeout(autoHintTimer);
     autoHintTimer = setTimeout(() => {
@@ -455,11 +491,13 @@ function scheduleAutoHintUpdate() {
     }, AUTO_HINT_DEBOUNCE_MS);
 }
 
+// 한국어 IME 조합 중인 Enter는 무시해야 한다.
 function isComposingEnter(e) {
     return e.isComposing === true || e.keyCode === 229;
 }
 
-async function handleListClick(e) {
+// 위임된 ul 클릭 이벤트 처리 — 수정/삭제 버튼에 대응한다.
+function handleListClick(e) {
     const itemEl = e.target.closest(".todo-item");
     if (!itemEl) return;
     const id = itemEl.dataset.id;
@@ -468,75 +506,38 @@ async function handleListClick(e) {
     if (e.target.classList.contains("edit-button")) {
         const todo = todosState.find((t) => t.id === id);
         if (todo) startEdit(itemEl, todo);
-        return;
-    }
-
-    if (e.target.classList.contains("delete-button")) {
-        const idx = todosState.findIndex((t) => t.id === id);
-        if (idx === -1) return;
-        const [removed] = todosState.splice(idx, 1);
+    } else if (e.target.classList.contains("delete-button")) {
+        const result = deleteTodo(id);
         renderTodos();
-
-        showToast({
-            message: `'${truncate(removed.text, 24)}' 삭제됨`,
-            action: {
-                label: "되돌리기",
-                onClick: async () => {
-                    const safeIndex = Math.min(idx, todosState.length);
-                    todosState.splice(safeIndex, 0, removed);
-                    recentlyAddedId = removed.id;
-                    renderTodos();
-                    try {
-                        await insertTodo(removed);
-                    } catch (err) {
-                        console.warn("복구 실패:", err);
-                        const i = todosState.findIndex((t) => t.id === removed.id);
-                        if (i !== -1) todosState.splice(i, 1);
+        if (result) {
+            showToast({
+                message: `'${truncate(result.todo.text, 28)}' 삭제됨`,
+                action: {
+                    label: "되돌리기",
+                    onClick: () => {
+                        restoreTodo(result.todo, result.index);
+                        recentlyAddedId = result.todo.id;
                         renderTodos();
-                        showError("복구에 실패했습니다.");
-                    }
+                    },
                 },
-            },
-            duration: UNDO_TOAST_DURATION_MS,
-        });
-
-        try {
-            await deleteTodoOnServer(id);
-        } catch (err) {
-            console.warn("삭제 실패:", err);
-            // 롤백 — 원래 자리에 되돌린다.
-            const safeIndex = Math.min(idx, todosState.length);
-            todosState.splice(safeIndex, 0, removed);
-            renderTodos();
-            showError("삭제에 실패했습니다.");
+                duration: UNDO_TOAST_DURATION_MS,
+            });
         }
     }
 }
 
-async function handleListChange(e) {
+// 위임된 ul change 이벤트 처리 — 체크박스 토글에 대응한다.
+function handleListChange(e) {
     if (!e.target.classList.contains("todo-checkbox")) return;
     const itemEl = e.target.closest(".todo-item");
     if (!itemEl) return;
     const id = itemEl.dataset.id;
     if (!id) return;
-
-    const todo = todosState.find((t) => t.id === id);
-    if (!todo) return;
-
-    const prev = todo.completed;
-    todo.completed = !prev;
+    toggleTodo(id);
     renderTodos();
-
-    try {
-        await updateTodoOnServer(id, { completed: todo.completed });
-    } catch (err) {
-        console.warn("토글 실패:", err);
-        todo.completed = prev;
-        renderTodos();
-        showError("상태 변경에 실패했습니다.");
-    }
 }
 
+// 해당 li를 인라인 편집 UI로 교체하고 저장(Enter) / 취소(Esc) 동작을 연결한다.
 function startEdit(li, todo) {
     li.innerHTML = "";
     li.classList.add("editing");
@@ -571,25 +572,12 @@ function startEdit(li, todo) {
     cancelBtn.type = "button";
     cancelBtn.textContent = "취소";
 
-    const commit = async () => {
+    const commit = () => {
         const newText = input.value.trim();
         if (!newText) return;
         const newCategory = resolveCategory(select.value, newText);
-
-        const prev = { text: todo.text, category: todo.category };
-        todo.text = newText;
-        todo.category = newCategory;
+        updateTodo(todo.id, newText, newCategory);
         renderTodos();
-
-        try {
-            await updateTodoOnServer(todo.id, { text: newText, category: newCategory });
-        } catch (err) {
-            console.warn("수정 실패:", err);
-            todo.text = prev.text;
-            todo.category = prev.category;
-            renderTodos();
-            showError("수정에 실패했습니다.");
-        }
     };
 
     const cancel = () => renderTodos();
@@ -613,19 +601,31 @@ function startEdit(li, todo) {
     input.select();
 }
 
+// 토스트 메시지에서 긴 텍스트를 줄여서 표시한다.
+function truncate(s, max) {
+    if (typeof s !== "string") return "";
+    return s.length > max ? s.slice(0, max - 1) + "…" : s;
+}
+
+// 필터 탭 그룹의 상/하/좌/우 화살표 키 처리 — tablist 권장 패턴.
+// 사이드바에서는 세로 배열이므로 위/아래 화살표도 함께 처리한다.
 function handleFilterKeydown(e) {
-    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight" && e.key !== "Home" && e.key !== "End") {
-        return;
-    }
+    const navKeys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"];
+    if (!navKeys.includes(e.key)) return;
     e.preventDefault();
     const buttons = Array.from(filterButtonEls);
     const currentIdx = buttons.findIndex((b) => b === document.activeElement);
     const lastIdx = buttons.length - 1;
     let nextIdx = currentIdx;
-    if (e.key === "ArrowLeft") nextIdx = currentIdx <= 0 ? lastIdx : currentIdx - 1;
-    else if (e.key === "ArrowRight") nextIdx = currentIdx >= lastIdx ? 0 : currentIdx + 1;
-    else if (e.key === "Home") nextIdx = 0;
-    else if (e.key === "End") nextIdx = lastIdx;
+    if (e.key === "ArrowLeft" || e.key === "ArrowUp") {
+        nextIdx = currentIdx <= 0 ? lastIdx : currentIdx - 1;
+    } else if (e.key === "ArrowRight" || e.key === "ArrowDown") {
+        nextIdx = currentIdx >= lastIdx ? 0 : currentIdx + 1;
+    } else if (e.key === "Home") {
+        nextIdx = 0;
+    } else if (e.key === "End") {
+        nextIdx = lastIdx;
+    }
     const target = buttons[nextIdx];
     if (target) {
         target.focus();
@@ -635,7 +635,8 @@ function handleFilterKeydown(e) {
 
 // ---------- 초기화 ----------
 
-document.addEventListener("DOMContentLoaded", async () => {
+// 페이지 로드 시 DOM 참조를 채우고, 이벤트를 연결하고, 첫 렌더를 수행한다.
+document.addEventListener("DOMContentLoaded", () => {
     todoListEl = document.getElementById("todo-list");
     todoInputEl = document.getElementById("todo-input");
     categorySelectEl = document.getElementById("category-select");
@@ -648,10 +649,25 @@ document.addEventListener("DOMContentLoaded", async () => {
     inputCounterEl = document.getElementById("input-counter");
     emptyStateEl = document.getElementById("empty-state");
     toastContainerEl = document.getElementById("toast-container");
+    listTitleEl = document.getElementById("list-title");
+    listMetaEl = document.getElementById("list-meta");
+    statTotalEl = document.getElementById("stat-total");
+    statDoneEl = document.getElementById("stat-done");
+    statRemainingEl = document.getElementById("stat-remaining");
+    countEls = {
+        all: document.getElementById("count-all"),
+        work: document.getElementById("count-work"),
+        personal: document.getElementById("count-personal"),
+        study: document.getElementById("count-study"),
+    };
+
+    // 메모리 상태를 한 번만 초기화한다.
+    todosState = loadTodos();
 
     addButtonEl.addEventListener("click", handleAdd);
     todoInputEl.addEventListener("keydown", (e) => {
         if (e.key !== "Enter") return;
+        // 한국어 조합 중 Enter는 조합 확정 신호이므로 무시(중복 추가 버그 방지).
         if (isComposingEnter(e)) return;
         handleAdd();
     });
@@ -663,35 +679,13 @@ document.addEventListener("DOMContentLoaded", async () => {
     updateAutoHint();
     updateInputCounter();
 
+    // ul에 1회만 위임 등록 — 매 렌더마다 li별 리스너를 새로 만들지 않는다.
     todoListEl.addEventListener("click", handleListClick);
     todoListEl.addEventListener("change", handleListChange);
 
     for (const btn of filterButtonEls) {
         btn.addEventListener("click", () => setFilter(btn.dataset.filter));
         btn.addEventListener("keydown", handleFilterKeydown);
-    }
-
-    // 1) 과거 localStorage 데이터를 1회 이관 시도 (실패해도 앱 자체는 계속 진행)
-    try {
-        const { migrated } = await migrateLegacyLocalStorage();
-        if (migrated > 0) {
-            showToast({
-                message: `로컬에 있던 ${migrated}개의 할 일을 Supabase로 옮겼습니다.`,
-                duration: INFO_TOAST_DURATION_MS,
-            });
-        }
-    } catch (e) {
-        console.warn("로컬 데이터 마이그레이션 실패:", e);
-        showError("이전 데이터 이관에 실패했습니다. 다음 접속 시 다시 시도합니다.");
-    }
-
-    // 2) Supabase에서 전체 목록을 불러와 초기 렌더
-    try {
-        todosState = await fetchAllTodos();
-    } catch (e) {
-        console.warn("데이터 로드 실패:", e);
-        todosState = [];
-        showError("데이터를 불러오지 못했습니다. 네트워크 상태를 확인해 주세요.");
     }
 
     setFilter(currentFilter);

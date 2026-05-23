@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>나의 할 일</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app">
+        <header class="app-header">
+            <h1>📋 나의 할 일</h1>
+            <p class="app-subtitle">오늘 해야 할 일들을 정리해 보세요</p>
+        </header>
+
+        <div class="layout">
+            <aside class="sidebar">
+                <section class="progress-section" aria-label="진행률">
+                    <h2 class="section-title">진행률</h2>
+                    <div
+                        class="progress-bar"
+                        id="progress-bar"
+                        role="progressbar"
+                        aria-label="할 일 진행률"
+                        aria-valuemin="0"
+                        aria-valuemax="100"
+                        aria-valuenow="0"
+                    >
+                        <div class="progress-bar-fill" id="progress-bar-fill"></div>
+                    </div>
+                    <p class="progress-text" id="progress-text">0 / 0 완료 (0%)</p>
+                    <div class="stats">
+                        <div class="stat">
+                            <span class="stat-value" id="stat-total">0</span>
+                            <span class="stat-label">전체</span>
+                        </div>
+                        <div class="stat">
+                            <span class="stat-value" id="stat-done">0</span>
+                            <span class="stat-label">완료</span>
+                        </div>
+                        <div class="stat">
+                            <span class="stat-value" id="stat-remaining">0</span>
+                            <span class="stat-label">남음</span>
+                        </div>
+                    </div>
+                </section>
+
+                <section class="filter-section" role="tablist" aria-label="카테고리 필터" aria-orientation="vertical">
+                    <h2 class="section-title">카테고리</h2>
+                    <button type="button" class="filter-button" role="tab" aria-selected="true" data-filter="all">
+                        <span class="filter-dot dot-all" aria-hidden="true"></span>
+                        <span class="filter-name">전체</span>
+                        <span class="filter-count" id="count-all" aria-label="전체 개수">0</span>
+                    </button>
+                    <button type="button" class="filter-button" role="tab" aria-selected="false" data-filter="work">
+                        <span class="filter-dot dot-work" aria-hidden="true"></span>
+                        <span class="filter-name">업무</span>
+                        <span class="filter-count" id="count-work" aria-label="업무 개수">0</span>
+                    </button>
+                    <button type="button" class="filter-button" role="tab" aria-selected="false" data-filter="personal">
+                        <span class="filter-dot dot-personal" aria-hidden="true"></span>
+                        <span class="filter-name">개인</span>
+                        <span class="filter-count" id="count-personal" aria-label="개인 개수">0</span>
+                    </button>
+                    <button type="button" class="filter-button" role="tab" aria-selected="false" data-filter="study">
+                        <span class="filter-dot dot-study" aria-hidden="true"></span>
+                        <span class="filter-name">공부</span>
+                        <span class="filter-count" id="count-study" aria-label="공부 개수">0</span>
+                    </button>
+                </section>
+            </aside>
+
+            <main class="main">
+                <section class="input-section">
+                    <label for="todo-input" class="visually-hidden">할 일 내용</label>
+                    <input
+                        type="text"
+                        id="todo-input"
+                        placeholder="할 일을 입력하세요. 예: 내일 회의 자료 준비"
+                        maxlength="200"
+                        autocomplete="off"
+                    >
+                    <label for="category-select" class="visually-hidden">카테고리 선택</label>
+                    <select id="category-select">
+                        <option value="auto">자동</option>
+                        <option value="work">업무</option>
+                        <option value="personal">개인</option>
+                        <option value="study">공부</option>
+                    </select>
+                    <button type="button" id="add-button">추가</button>
+                    <p class="input-counter" id="input-counter" aria-live="off">0 / 200</p>
+                    <p class="auto-hint" id="auto-hint" aria-live="polite" hidden></p>
+                </section>
+
+                <section class="list-section">
+                    <div class="list-header">
+                        <h2 class="list-title" id="list-title">전체 할 일</h2>
+                        <span class="list-meta" id="list-meta">0개</span>
+                    </div>
+                    <ul id="todo-list" aria-label="할 일 목록"></ul>
+                    <p class="empty-state" id="empty-state" hidden></p>
+                </section>
+            </main>
+        </div>
+    </div>
+
+    <div class="toast-container" id="toast-container" aria-live="polite" aria-atomic="false"></div>
+
+    <script src="app.js"></script>
+</body>
+</html>

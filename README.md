@@ -53,7 +53,7 @@ JSON.parse(localStorage.getItem("todos"));
 ## 파일 구조
 
 ```
-todo-app/
+Project1/
 ├── index.html   # DOM 골격 (헤더 / 진행률 / 입력 / 필터 / 목록)
 ├── style.css    # 스타일 + 카테고리 색상 + 반응형
 ├── app.js       # 데이터 / 렌더링 / 이벤트 / 초기화

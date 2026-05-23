@@ -1,11 +1,11 @@
-# Claude Code session artifacts
-*-continue.txt
-CLAUDE.md
-
-# OS
-Thumbs.db
 .DS_Store
+Thumbs.db
+node_modules/
+*.log
+.env
+.env.local
 
-# Editor
-.vscode/
-.idea/
+# Claude Code 작업 디렉터리 / 로컬 산출물
+.claude/
+2026-*-continue.txt
+캡처.png
